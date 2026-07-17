@@ -9,8 +9,9 @@
 #include <unistd.h>
 #include <sched.h>
 #include <algorithm>
-#include <string>
-#include <mutex>
+#include <thread>
+#include <chrono>
+ #include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <android/log.h>
@@ -909,30 +910,36 @@ static jobject buildMessagingNotification(JNIEnv* env, const ParsedMsg& pm, jobj
 
 static jobject processAndBuild(JNIEnv* env, jobject notif) {
     if (!notif) return nullptr;
+    LOGI("pb1: cacheJniIds");
     if (!cacheJniIds(env)) { LOGE("processAndBuild: cacheJniIds failed"); return nullptr; }
-
+    LOGI("pb2: reading extras");
     jobject extras = env->GetObjectField(notif, f_Notif_extras);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); }
+    LOGI("pb3: extras=%p", extras);
     std::string title = extrasGetStr(env, extras, "android.title");
+    LOGI("pb4: title=%s", title.c_str());
     std::string text  = extrasGetStr(env, extras, "android.text");
+    LOGI("pb5: text=%s", text.c_str());
     jobject tickerCs  = f_Notif_tickerText ? env->GetObjectField(notif, f_Notif_tickerText) : nullptr;
     std::string ticker = csToString(env, tickerCs);
+    LOGI("pb6: ticker=%s", ticker.c_str());
     if (tickerCs) env->DeleteLocalRef(tickerCs);
     if (extras) env->DeleteLocalRef(extras);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
-
+    LOGI("pb7: parsing");
     ParsedMsg pm = parseNotification(title, ticker, text);
+    LOGI("pb8: parse type=%d", (int)pm.type);
     if (pm.type == MsgType::None || pm.type == MsgType::Hidden) {
         return nullptr;  // passthrough — not a QQ chat notification
     }
-    LOGI("parse: type=%d name=%s group=%s special=%d num=%d",
+    LOGI("pb9: parse ok type=%d name=%s group=%s special=%d num=%d",
          (int)pm.type, pm.name.c_str(), pm.groupName.c_str(), (int)pm.special, pm.num);
-
+    LOGI("pb10: buildMessagingNotification");
     jobject built = buildMessagingNotification(env, pm, notif);
+    LOGI("pb11: built=%p", built);
     if (env->ExceptionCheck()) { env->ExceptionClear(); if (built) env->DeleteLocalRef(built); return nullptr; }
     return built;
 }
-
-// ============================================================
 // callNotifyAsUserDirect: deliver a Notification via the UNHOOKED
 // NotificationManager.notifyAsUser(String,int,Notification,UserHandle).
 //
@@ -1010,37 +1017,41 @@ static void callNotifyAsUserDirect(JNIEnv* env, jobject thiz,
 
 // ============================================================
 // Shared hook body: parse, rebuild, deliver via unhooked notifyAsUser.
+//
+// CRITICAL: we NEVER call ensureAppContext() or cacheJniIds() inside the
+// callback. Both are pre-cached by the polling thread BEFORE the hook is
+// installed. Lazy JNI init inside the callback on a QQ worker thread
+// crashes QQ (class-init side effects on non-main threads).
+// If state isn't ready for any reason, we deliver the ORIGINAL notification
+// unchanged — a notification is never dropped.
 // ============================================================
+
+static bool g_hook_ready = false;  // set true by polling thread after all precache
 
 static void doHookBody(JNIEnv* env, jobject thiz, jstring tag, jint id,
                        jobject notif, const char* which) {
-    LOGI("hook fired: %s id=%d notif=%p", which, (int)id, notif);
+    LOGI("hook fired: %s id=%d ready=%d", which, (int)id, (int)g_hook_ready);
 
     if (g_in_hook) {
-        // Reentrant call (shouldn't happen — notifyAsUser doesn't call
-        // notify). Deliver original directly, no rebuild.
         callNotifyAsUserDirect(env, thiz, tag, id, notif);
         return;
     }
     g_in_hook = true;
     std::lock_guard<std::mutex> lk(g_hook_mtx);
 
-    jobject toPost = notif;   // default: pass-through
+    jobject toPost = notif;
     jobject built  = nullptr;
 
-    if (ensureAppContext(env) && cacheJniIds(env)) {
+    if (g_hook_ready) {
         built = processAndBuild(env, notif);
-        if (built) {
-            toPost = built;
-            LOGI("rebuilt notification delivered via %s", which);
-        } else {
-            LOGI("passthrough (not a QQ chat or build failed) via %s", which);
-        }
+        if (env->ExceptionCheck()) { env->ExceptionClear(); built = nullptr; }
+        if (built) toPost = built;
     } else {
-        LOGE("app context / jni ids not ready — passthrough via %s", which);
+        LOGI("hook not ready — passthrough");
     }
 
     callNotifyAsUserDirect(env, thiz, tag, id, toPost);
+    LOGI("delivered: %s rebuilt=%d", which, built ? 1 : 0);
 
     if (built) env->DeleteLocalRef(built);
     g_in_hook = false;
@@ -1183,30 +1194,66 @@ public:
             return;
         }
 
-        // Cache Application context (for channel creation + builder ctor).
-        // If Application isn't ready yet here, ensureAppContext() will
-        // resolve it lazily on the first hook fire.
-        jclass at = env->FindClass("android/app/ActivityThread");
-        if (at) {
-            jmethodID cur = env->GetStaticMethodID(at,
-                "currentApplication", "()Landroid/app/Application;");
-            if (cur) {
-                jobject app = env->CallStaticObjectMethod(at, cur);
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                if (app) {
-                    g_app_context = env->NewGlobalRef(app);
-                    env->DeleteLocalRef(app);
-                }
+        // Defer all initialization + hook installation to a background thread.
+        // postAppSpecialize runs BEFORE Application.onCreate, so g_app_context
+        // is not available yet. The polling thread waits for Application
+        // readiness, pre-caches ALL JNI state (context, ids, channels), THEN
+        // installs the hook — so the hook callback never does lazy JNI init.
+        std::thread([]() {
+            JNIEnv* env;
+            JavaVMAttachArgs attachArgs = {JNI_VERSION_1_6, "QQNotifyEvoInit", nullptr};
+            if (g_vm->AttachCurrentThread(&env, &attachArgs) != JNI_OK) {
+                LOGE("AttachCurrentThread failed"); return;
             }
+
+            // Poll until Application is ready (up to 60s)
+            jclass at = env->FindClass("android/app/ActivityThread");
+            if (!at) { LOGE("ActivityThread class missing"); g_vm->DetachCurrentThread(); return; }
+            jmethodID cur = env->GetStaticMethodID(at, "currentApplication",
+                "()Landroid/app/Application;");
             env->DeleteLocalRef(at);
-        }
-        if (env->ExceptionCheck()) env->ExceptionClear();
+            if (!cur) { LOGE("currentApplication method missing"); g_vm->DetachCurrentThread(); return; }
 
-        if (g_app_context) createChannelsOnce(env);
+            jobject app = nullptr;
+            for (int i = 0; i < 120; i++) {
+                env->ExceptionClear();
+                app = env->CallStaticObjectMethod(
+                    env->FindClass("android/app/ActivityThread"), cur);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); app = nullptr; }
+                if (app) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
 
-        // Install the notify hook synchronously. NotificationManager is a
-        // boot framework class — always available, no polling needed.
-        installNotifyHook(env);
+            if (!app) {
+                LOGE("Application not ready after 60s — aborting hook");
+                g_vm->DetachCurrentThread();
+                return;
+            }
+
+            g_app_context = env->NewGlobalRef(app);
+            env->DeleteLocalRef(app);
+            LOGI("Application ready: %p — precaching", g_app_context);
+
+            // Pre-cache channels + all JNI ids BEFORE installing hook
+            createChannelsOnce(env);
+            if (!cacheJniIds(env)) {
+                LOGE("cacheJniIds failed — aborting hook");
+                g_vm->DetachCurrentThread();
+                return;
+            }
+            if (!resolveDeliveryIds(env)) {
+                LOGE("resolveDeliveryIds failed — aborting hook");
+                g_vm->DetachCurrentThread();
+                return;
+            }
+
+            // All state pre-cached — install hook and mark ready
+            installNotifyHook(env);
+            g_hook_ready = true;
+            LOGI("hook installed and marked ready");
+
+            g_vm->DetachCurrentThread();
+        }).detach();
     }
 
 private:
