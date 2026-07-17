@@ -42,6 +42,8 @@ jobs:
         with:
           name: qq_notify_evolution-smoke
           path: build/qq_notify_evolution-*.zip
+          if-no-files-found: error
+          retention-days: 14
 
   host-parser-test:
     name: Parser host unit test (g++)
