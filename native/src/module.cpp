@@ -65,12 +65,14 @@ static thread_local bool g_in_hook = false;  // reentrancy guard
 
 static jmethodID g_notify_str_mid = nullptr;  // notify(String,int,Notification)
 static jmethodID g_notify_int_mid = nullptr;  // notify(int,Notification)
+static jmethodID g_notifyAsUser_mid = nullptr; // notifyAsUser(String,int,Notification,UserHandle) @hide
 static SavedMethod g_saved_tag;
 static SavedMethod g_saved_int;
-
+static SavedMethod g_saved_asUser;  // notifyAsUser is the real workhorse
 // Forward declarations of native callbacks
 static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobject notif);
 static void jni_notify(JNIEnv* env, jobject thiz, jint id, jobject notif);
+static void jni_notifyAsUser(JNIEnv* env, jobject thiz, jstring tag, jint id, jobject notif, jobject user);
 
 // ============================================================
 // Initialize version-dependent access flag values
@@ -270,6 +272,41 @@ static void callOriginalStr(JNIEnv* env, jobject thiz, jint id, jstring tag, job
     if (kAccPreCompiled) f &= ~kAccPreCompiled;
     *reinterpret_cast<uint32_t*>(s.art + g_access_flags_offset) = f;
     *reinterpret_cast<void**>(s.art + g_data_offset) = reinterpret_cast<void*>(jni_notify_tag);
+    *reinterpret_cast<void**>(s.art + g_entry_point_offset) = g_jni_trampoline;
+}
+
+// ============================================================
+// callOriginalAsUser: temporarily restore notifyAsUser(String,int,
+// Notification,UserHandle), invoke it, then re-hook. Used by the
+// notifyAsUser callback path. Caller MUST hold g_hook_mtx.
+// ============================================================
+
+static void callOriginalAsUser(JNIEnv* env, jobject thiz, jint id, jstring tag,
+                               jobject notif, jobject user) {
+    SavedMethod& s = g_saved_asUser;
+    if (!s.art) {
+        LOGE("callOriginalAsUser: no saved method");
+        return;
+    }
+
+    // Temporarily restore original fields
+    *reinterpret_cast<uint32_t*>(s.art + g_access_flags_offset) = s.orig_flags;
+    *reinterpret_cast<void**>(s.art + g_data_offset) = s.orig_data;
+    *reinterpret_cast<void**>(s.art + g_entry_point_offset) = s.orig_entry;
+
+    // Invoke original notifyAsUser(String,int,Notification,UserHandle)
+    env->CallVoidMethod(thiz, g_notifyAsUser_mid, tag, id, notif, user);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    // Re-hook (rewrite native fields)
+    uint32_t f = s.orig_flags;
+    f |= kAccNative;
+    if (kAccCompileDontBother) f |= kAccCompileDontBother;
+    if (kAccPreCompiled) f &= ~kAccPreCompiled;
+    *reinterpret_cast<uint32_t*>(s.art + g_access_flags_offset) = f;
+    *reinterpret_cast<void**>(s.art + g_data_offset) = reinterpret_cast<void*>(jni_notifyAsUser);
     *reinterpret_cast<void**>(s.art + g_entry_point_offset) = g_jni_trampoline;
 }
 
@@ -956,6 +993,25 @@ static void jni_notify(JNIEnv* env, jobject thiz, jint id, jobject notif) {
     }
 }
 
+// notifyAsUser is the @hide method that BOTH notify() overloads delegate to
+// internally, and that QQNT calls directly. Hooking it catches everything.
+static void jni_notifyAsUser(JNIEnv* env, jobject thiz, jstring tag, jint id,
+                             jobject notif, jobject user) {
+    std::lock_guard<std::mutex> lk(g_hook_mtx);
+    if (g_in_hook) {
+        callOriginalAsUser(env, thiz, id, tag, notif, user);
+        return;
+    }
+    ReentrancyGuard guard(g_in_hook);
+    jobject built = processAndBuild(env, notif);
+    if (built) {
+        callOriginalAsUser(env, thiz, id, tag, built, user);
+        env->DeleteLocalRef(built);
+    } else {
+        callOriginalAsUser(env, thiz, id, tag, notif, user);
+    }
+}
+
 // ============================================================
 // installNotifyHooks: locate both NotificationManager.notify overloads
 // and native-ize them.
@@ -973,8 +1029,14 @@ static void installNotifyHooks(JNIEnv* env) {
         "(Ljava/lang/String;ILandroid/app/Notification;)V");
     g_notify_int_mid = env->GetMethodID(nmClass, "notify",
         "(ILandroid/app/Notification;)V");
-    if (env->ExceptionCheck() || !g_notify_str_mid || !g_notify_int_mid) {
-        env->ExceptionClear();
+    // notifyAsUser is @hide but public; reachable via reflection. It is the
+    // single funnel point that both notify() overloads delegate to, and that
+    // QQNT calls directly on modern Android. Signature:
+    //   void notifyAsUser(String tag, int id, Notification n, UserHandle user)
+    g_notifyAsUser_mid = env->GetMethodID(nmClass, "notifyAsUser",
+        "(Ljava/lang/String;ILandroid/app/Notification;Landroid/os/UserHandle;)V");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!g_notify_str_mid || !g_notify_int_mid) {
         LOGE("notify method ids not found");
         env->DeleteLocalRef(nmClass);
         return;
@@ -982,6 +1044,8 @@ static void installNotifyHooks(JNIEnv* env) {
 
     jobject mStr = env->ToReflectedMethod(nmClass, g_notify_str_mid, JNI_FALSE);
     jobject mInt = env->ToReflectedMethod(nmClass, g_notify_int_mid, JNI_FALSE);
+    jobject mAsUser = g_notifyAsUser_mid
+        ? env->ToReflectedMethod(nmClass, g_notifyAsUser_mid, JNI_FALSE) : nullptr;
     env->DeleteLocalRef(nmClass);
     if (!mStr || !mInt) {
         LOGE("ToReflectedMethod failed");
@@ -990,10 +1054,15 @@ static void installNotifyHooks(JNIEnv* env) {
 
     bool ok1 = installHook(env, mStr, reinterpret_cast<void*>(jni_notify_tag), g_saved_tag);
     bool ok2 = installHook(env, mInt, reinterpret_cast<void*>(jni_notify), g_saved_int);
+    bool ok3 = false;
+    if (mAsUser) {
+        ok3 = installHook(env, mAsUser, reinterpret_cast<void*>(jni_notifyAsUser), g_saved_asUser);
+        env->DeleteLocalRef(mAsUser);
+    }
     env->DeleteLocalRef(mStr);
     env->DeleteLocalRef(mInt);
 
-    LOGI("notify hooks installed: tag=%d int=%d", ok1, ok2);
+    LOGI("notify hooks installed: tag=%d int=%d asUser=%d", ok1, ok2, ok3);
 }
 
 // ============================================================
