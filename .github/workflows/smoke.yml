@@ -1,0 +1,55 @@
+name: Smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-android:
+    name: Build module (NDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: r27c
+
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup_ndk.outputs.ndk-path }}
+          MODULE_VERSION: v1.0.0-ci
+          MODULE_VERSION_CODE: 1
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Verify zip contents
+        run: |
+          zip=$(ls build/qq_notify_evolution-*.zip | head -n1)
+          echo "zip=$zip"
+          test -n "$zip" || { echo "no zip produced"; exit 1; }
+          unzip -l "$zip"
+          unzip -l "$zip" | grep -q 'zygisk/arm64-v8a.so'     || { echo "missing arm64-v8a.so"; exit 1; }
+          unzip -l "$zip" | grep -q 'zygisk/armeabi-v7a.so'   || { echo "missing armeabi-v7a.so"; exit 1; }
+          unzip -l "$zip" | grep -q 'module.prop'             || { echo "missing module.prop"; exit 1; }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qq_notify_evolution-smoke
+          path: build/qq_notify_evolution-*.zip
+
+  host-parser-test:
+    name: Parser host unit test (g++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & run parser test
+        run: |
+          g++ -std=c++17 -Wall -Wextra native/src/parser.cpp native/test/parser_test.cpp -o /tmp/pt
+          /tmp/pt
