@@ -222,7 +222,7 @@
         });
       };
       try {
-        host.exec(cmd, "{}", cbName);
+        host.exec(cmd, "{\"root\":true}", cbName);
       } catch (e) {
         if (done) return;
         done = true;
