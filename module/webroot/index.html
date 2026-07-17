@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>QQ Notify Evolution</title>
+<style>
+  :root {
+    /* Material 3 default seed (blue). Overridden by host dynamic-color tokens
+       when an enhanced WebUI host (MMRL/KsuWebUIX) injects --md-sys-color-*. */
+    --md-sys-color-primary: #4f6bff;
+    --md-sys-color-on-primary: #ffffff;
+    --md-sys-color-primary-container: #dbe1ff;
+    --md-sys-color-on-primary-container: #001555;
+    --md-sys-color-surface: #fefbff;
+    --md-sys-color-on-surface: #1b1b1f;
+    --md-sys-color-surface-variant: #e2e1ec;
+    --md-sys-color-on-surface-variant: #45464f;
+    --md-sys-color-outline: #767680;
+    --md-sys-color-outline-variant: #c6c5d0;
+    --md-sys-color-error: #ba1a1a;
+    --md-sys-color-on-error: #ffffff;
+    --md-sys-color-secondary: #5a5d72;
+    --md-sys-color-green: #2e7d32;
+    --md-sys-color-amber: #e65100;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --md-sys-color-primary: #b6c4ff;
+      --md-sys-color-on-primary: #002685;
+      --md-sys-color-primary-container: #2846a3;
+      --md-sys-color-on-primary-container: #dbe1ff;
+      --md-sys-color-surface: #121318;
+      --md-sys-color-on-surface: #e4e1e9;
+      --md-sys-color-surface-variant: #45464f;
+      --md-sys-color-on-surface-variant: #c6c5d0;
+      --md-sys-color-outline: #90909a;
+      --md-sys-color-outline-variant: #45464f;
+      --md-sys-color-error: #ffb4ab;
+      --md-sys-color-on-error: #690005;
+      --md-sys-color-secondary: #c3c5dd;
+      --md-sys-color-green: #81c784;
+      --md-sys-color-amber: #ffb74d;
+      color-scheme: dark;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--md-sys-color-surface);
+    color: var(--md-sys-color-on-surface);
+    font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans CJK SC",
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    -webkit-text-size-adjust: 100%;
+    line-height: 1.5;
+  }
+  .card {
+    width: 100%;
+    max-width: 540px;
+    background: color-mix(in srgb, var(--md-sys-color-surface) 92%, transparent);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: 24px;
+    padding: 28px 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
+  }
+  header { text-align: center; margin-bottom: 8px; }
+  .appicon {
+    width: 56px; height: 56px; border-radius: 16px;
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 28px; font-weight: 700;
+    margin-bottom: 10px;
+  }
+  h1 { font-size: 1.35rem; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .subtitle { color: var(--md-sys-color-on-surface-variant); font-size: .9rem; margin-top: 4px; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: .78rem; font-weight: 500;
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    color: var(--md-sys-color-on-surface-variant);
+    margin-top: 12px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--md-sys-color-outline); }
+  .dot.ok   { background: var(--md-sys-color-green); }
+  .dot.warn { background: var(--md-sys-color-amber); }
+  .dot.err  { background: var(--md-sys-color-error); }
+
+  section { margin-top: 24px; }
+  h2 { font-size: .82rem; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--md-sys-color-on-surface-variant); margin: 0 0 12px; font-weight: 600; }
+
+  .row {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; padding: 11px 0;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  }
+  .row:last-child { border-bottom: none; }
+  .k { color: var(--md-sys-color-on-surface-variant); font-size: .92rem; flex-shrink: 0; }
+  .v { text-align: right; font-size: .92rem; font-weight: 500; word-break: break-word; max-width: 62%; }
+  .v.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .85rem; }
+  .v.good { color: var(--md-sys-color-green); }
+  .v.bad  { color: var(--md-sys-color-error); }
+  .v.warn { color: var(--md-sys-color-amber); }
+  .v.loading { color: var(--md-sys-color-outline); font-style: italic; font-weight: 400; }
+
+  .note {
+    margin-top: 22px; padding: 12px 14px; border-radius: 16px;
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+    font-size: .85rem; line-height: 1.5;
+  }
+  .credits { margin-top: 16px; font-size: .8rem; color: var(--md-sys-color-on-surface-variant); text-align: center; }
+  .credits a { color: var(--md-sys-color-primary); text-decoration: none; }
+
+  .host-hint { display: none; margin-top: 18px; padding: 12px 14px; border-radius: 16px;
+    background: var(--md-sys-color-surface-variant); color: var(--md-sys-color-on-surface-variant);
+    font-size: .84rem; line-height: 1.5; }
+  .host-hint.show { display: block; }
+
+  /* Watch / very small screens */
+  @media (max-width: 320px) {
+    body { padding: 8px; }
+    .card { padding: 18px 14px; border-radius: 18px; }
+    h1 { font-size: 1.1rem; }
+    .k, .v { font-size: .82rem; }
+    .row { gap: 8px; }
+    .v { max-width: 55%; }
+  }
+</style>
+</head>
+<body>
+  <main class="card">
+    <header>
+      <div class="appicon">QQ</div>
+      <h1 id="m-name">QQ Notify Evolution</h1>
+      <div class="subtitle">将 QQ 通知改写为标准 MessagingStyle 样式</div>
+      <div class="pill"><span class="dot" id="status-dot"></span><span id="status-text">读取中…</span></div>
+    </header>
+
+    <div class="host-hint" id="host-hint">
+      未检测到 KernelSU / APatch WebUI 环境。请在 KernelSU 或 APatch 管理器中打开本页面以查看实时状态。
+    </div>
+
+    <section>
+      <h2>模块</h2>
+      <div class="row"><span class="k">版本</span><span class="v loading" id="m-version">—</span></div>
+      <div class="row"><span class="k">状态</span><span class="v loading" id="m-enabled">—</span></div>
+    </section>
+
+    <section>
+      <h2>环境</h2>
+      <div class="row"><span class="k">Root 方案</span><span class="v loading" id="e-root">—</span></div>
+      <div class="row"><span class="k">Zygisk</span><span class="v loading" id="e-zygisk">—</span></div>
+      <div class="row"><span class="k">QQ 安装</span><span class="v loading" id="e-qq">—</span></div>
+      <div class="row"><span class="k">Android API</span><span class="v loading mono" id="e-api">—</span></div>
+    </section>
+
+    <div class="note">
+      v1 仅做通知改写展示，无直接回复 / 气泡功能，无可开关项。模块禁用并重启即可恢复 QQ 原始通知。
+    </div>
+
+    <div class="credits">
+      致谢 <a href="https://github.com/ichenhe/QQ-Notify-Evolution" target="_blank" rel="noopener">QQ-Notify-Evolution</a>
+      与 <a href="https://github.com/cinit/QAuxiliary" target="_blank" rel="noopener">QAuxiliary</a>
+    </div>
+  </main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- KernelSU / APatch exec API feature detection ----------------------
+  // KSU/APatch WebUI expose a global exec(cmd, opts, callback) returning a
+  // unique id; callback signature is (errno, stdout, stderr).
+  var hasKsu = typeof window.ksu !== "undefined" && typeof window.ksu.exec === "function";
+  var hasApatch = typeof window.apatch !== "undefined" && typeof window.apatch.exec === "function";
+
+  function execHost() {
+    if (hasKsu) return window.ksu;
+    if (hasApatch) return window.apatch;
+    return null;
+  }
+
+  var _seq = 0;
+  function runShell(cmd, timeoutMs) {
+    return new Promise(function (resolve) {
+      var host = execHost();
+      if (!host) {
+        resolve({ ok: false, errno: -1, stdout: "", stderr: "no-webui-host" });
+        return;
+      }
+      var done = false;
+      var cbName = "__qqnevo_cb_" + (_seq++);
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+        resolve({ ok: false, errno: -1, stdout: "", stderr: "timeout" });
+      }, timeoutMs || 6000);
+
+      window[cbName] = function (errno, stdout, stderr) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+        resolve({
+          ok: (errno === 0),
+          errno: errno,
+          stdout: (stdout || "").trim(),
+          stderr: (stderr || "").trim()
+        });
+      };
+      try {
+        host.exec(cmd, "{}", cbName);
+      } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { delete window[cbName]; } catch (err) { window[cbName] = undefined; }
+        resolve({ ok: false, errno: -1, stdout: "", stderr: String(e) });
+      }
+    });
+  }
+
+  // ---- dynamic color: use host M3 tokens if injected ---------------------
+  function applyDynamicColor() {
+    try {
+      var cs = getComputedStyle(document.documentElement);
+      var p = cs.getPropertyValue("--md-sys-color-primary");
+      if (p && p.trim()) {
+        // host injected full palette; ensure derived vars resolve.
+        document.documentElement.style.colorScheme =
+          (cs.getPropertyValue("--md-sys-color-surface").trim()) ? "light dark" : "light";
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---- DOM helpers -------------------------------------------------------
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = text; el.classList.remove("loading"); }
+  }
+  function setCls(id) { return document.getElementById(id); }
+
+  function setOkDot(ok) {
+    var dot = document.getElementById("status-dot");
+    var txt = document.getElementById("status-text");
+    dot.className = "dot " + (ok ? "ok" : "warn");
+    txt.textContent = ok ? "已启用" : "已禁用";
+  }
+
+  function fallbackStatic() {
+    // No exec host: show friendly hint, best-effort static read of moduleInfo if present.
+    document.getElementById("host-hint").classList.add("show");
+    var version = "—", name = "QQ Notify Evolution";
+    try {
+      if (typeof window.moduleInfo === "object" && window.moduleInfo) {
+        name = window.moduleInfo.name || name;
+        version = window.moduleInfo.version || version;
+      }
+    } catch (e) {}
+    document.getElementById("m-name").textContent = name;
+    setText("m-version", version);
+    setText("m-enabled", "未知");
+    setText("e-root", "未知");
+    setText("e-zygisk", "未知");
+    setText("e-qq", "未知");
+    setText("e-api", "—");
+    var dot = document.getElementById("status-dot");
+    dot.className = "dot warn";
+    document.getElementById("status-text").textContent = "无 WebUI 宿主";
+  }
+
+  function detectRootScheme() {
+    if (hasKsu) return "KernelSU";
+    if (hasApatch) return "APatch";
+    return null;
+  }
+
+  function init() {
+    applyDynamicColor();
+    if (!execHost()) { fallbackStatic(); return; }
+
+    // module.prop + enable state + environment, batched into one shell call
+    // to minimize round-trips.
+    var script = [
+      "echo '<<VERSION>>';",
+      "grep '^version=' /data/adb/modules/qq_notify_evolution/module.prop 2>/dev/null | cut -d= -f2 || echo '-'",
+      "echo '<<ENABLED>>';",
+      "if [ ! -e /data/adb/modules/qq_notify_evolution/disable ]; then echo 'yes'; else echo 'no'; fi",
+      "echo '<<ROOT>>';",
+      // Root scheme — filesystem markers (installer env vars are NOT set in
+      // WebUI exec context, only during module install). Prefer JS host hint.
+      "if [ -d /data/adb/ksu ]; then echo KernelSU;",
+      "elif [ -d /data/adb/ap ]; then echo APatch;",
+      "elif [ -d /data/adb/magisk ]; then echo Magisk;",
+      "else echo unknown; fi",
+      "echo '<<ZYGISK>>';",
+      // Zygisk detection across all combos. Returns a provider label, not
+      // just yes/no, because Magisk-built-in / ZygiskNext / ReZygisk all
+      // coexist with different root schemes and leave different artifacts.
+      "zygisk=unknown;",
+      "for mp in /data/adb/modules/*/module.prop; do",
+      "  [ -f \"$mp\" ] || continue;",
+      "  mid=$(grep '^id=' \"$mp\" 2>/dev/null | head -n1 | cut -d= -f2);",
+      "  case \"$mid\" in",
+      "    zygisksu|zygisk_next|zygisk_qq) zygisk=ZygiskNext; break ;;",
+      "    rezygisk|re_zygisk) zygisk=ReZygisk; break ;;",
+      "  esac;",
+      "done;",
+      "[ \"$zygisk\" = unknown ] && [ -d /data/adb/zygisksu ] && zygisk=ZygiskNext;",
+      "[ \"$zygisk\" = unknown ] && [ -d /data/adb/rezygisk ] && zygisk=ReZygisk;",
+      // Magisk built-in Zygisk: read its db setting (sqlite3 may be absent)
+      "if [ \"$zygisk\" = unknown ] && [ -d /data/adb/magisk ] && command -v sqlite3 >/dev/null 2>&1; then",
+      "  v=$(sqlite3 /data/adb/magisk.db \"SELECT value FROM settings WHERE key='zygisk';\" 2>/dev/null);",
+      "  [ \"$v\" = 1 ] && zygisk='Magisk(内置)';",
+      "fi;",
+      // Running daemon as last resort (ZygiskNext & ReZygisk both run zygiskd)
+      "if [ \"$zygisk\" = unknown ] && pidof zygiskd >/dev/null 2>&1; then zygisk='zygiskd(运行中)'; fi;",
+      "echo \"$zygisk\"",
+      "echo '<<QQ>>';",
+      "if [ -n \"$(pm path com.tencent.mobileqq)\" ]; then echo yes; else echo no; fi",
+      "echo '<<API>>';",
+      "getprop ro.build.version.sdk 2>/dev/null || echo -"
+    ].join(" ");
+
+    runShell(script, 8000).then(function (r) {
+      if (!r.ok) {
+        setText("m-version", "读取失败");
+        setText("m-enabled", "读取失败");
+        var dot = document.getElementById("status-dot");
+        dot.className = "dot err";
+        document.getElementById("status-text").textContent = "读取失败";
+        return;
+      }
+      var out = r.stdout;
+      function sec(tag) {
+        var i = out.indexOf("<<" + tag + ">>");
+        if (i < 0) return "";
+        var start = i + tag.length + 4; // "<<>>"
+        var j = out.indexOf("<<", start);
+        var chunk = (j < 0) ? out.substring(start) : out.substring(start, j);
+        return chunk.replace(/^\s+|\s+$/g, "");
+      }
+      var version = sec("VERSION") || "—";
+      var enabled = sec("ENABLED");
+      var root = detectRootScheme() || sec("ROOT") || "未知";
+      var zygisk = sec("ZYGISK");
+      var qq = sec("QQ");
+      var api = sec("API");
+
+      setText("m-version", version);
+      var eEl = setCls("m-enabled");
+      if (enabled === "yes") { eEl.textContent = "已启用"; eEl.className = "v good"; }
+      else { eEl.textContent = "已禁用"; eEl.className = "v bad"; }
+      setOkDot(enabled === "yes");
+
+      var rootEl = setCls("e-root");
+      rootEl.textContent = root === "unknown" ? "未识别" : root;
+      rootEl.className = "v";
+
+      var zEl = setCls("e-zygisk");
+      if (zygisk && zygisk !== "unknown") { zEl.textContent = zygisk; zEl.className = "v good"; }
+      else { zEl.textContent = "未检测到"; zEl.className = "v warn"; }
+
+      var qEl = setCls("e-qq");
+      if (qq === "yes") { qEl.textContent = "已安装"; qEl.className = "v good"; }
+      else { qEl.textContent = "未安装"; qEl.className = "v bad"; }
+
+      var apiN = parseInt(api, 10);
+      var aEl = setCls("e-api");
+      if (!isNaN(apiN)) {
+        aEl.textContent = api + (apiN >= 26 ? " (支持)" : " (过低)");
+        aEl.className = "v mono " + (apiN >= 26 ? "good" : "bad");
+      } else {
+        aEl.textContent = "—";
+      }
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>
