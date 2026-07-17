@@ -1,0 +1,6 @@
+{
+    "version": "v1.0.0",
+    "versionCode": 1,
+    "zipUrl": "https://github.com/bluseliu50/zygisk-qq-notify-evolution/releases/download/v1.0.0/qq_notify_evolution-v1.0.0.zip",
+    "changelog": "首个版本：MessagingStyle 改写 + 分渠道 + 会话历史"
+}

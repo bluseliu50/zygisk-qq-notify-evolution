@@ -1,0 +1,7 @@
+id=qq_notify_evolution
+name=QQ Notify Evolution
+version=v1.0.0
+versionCode=1
+author=bluseliu50
+description=通过 Zygisk 将 QQ 通知改写为标准 MessagingStyle 样式（多会话/分渠道/带头像，兼容手表）。需要 Zygisk 支持。致谢 QQ-Notify-Evolution 与 QAuxiliary。
+updateJson=https://raw.githubusercontent.com/bluseliu50/zygisk-qq-notify-evolution/main/update.json
