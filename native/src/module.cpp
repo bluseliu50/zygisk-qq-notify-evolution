@@ -31,8 +31,9 @@ static jobject g_app_context = nullptr;  // global ref to android.app.Applicatio
 // ============================================================
 // Hook strategy (framework-free — no Pine/SandHook/Dobby/LSPlant)
 //
-// We native-ize exactly ONE ArtMethod:
-//   android.app.NotificationManager.notify(String,int,Notification)
+// We native-ize BOTH NotificationManager.notify overloads:
+//   notify(int, Notification)
+//   notify(String, int, Notification)
 // using the same direct-ArtMethod-edit technique as zygisk-qq-native-emoji:
 // set kAccNative, point data_ at our JNI function, point entry_point at
 // art_quick_generic_jni_trampoline (read from Object.hashCode()'s ArtMethod).
@@ -49,9 +50,14 @@ static jobject g_app_context = nullptr;  // global ref to android.app.Applicatio
 // its ArtMethod is pristine, so dispatch reaches NotificationManagerService
 // normally. No restore, no QRoute proxy, no call-original dance.
 //
-// NotificationManager.notify(int,Notification) is implemented in framework
-// as notify(null,id,notification), so QQ traffic — regardless of which
-// overload QQ calls — funnels through the 3-arg form we hook.
+// We hook BOTH notify overloads because on API 37 the AOT-compiled
+// notify(int,Notification) may call notifyAsUser directly (inline), bypassing
+// notify(String,int,Notification). Hooking only one risks missing QQ's
+// dispatch entirely.
+//
+// Delivery uses Process.myUserHandle(), NOT UserHandle.ALL — ALL requires
+// INTERACT_ACROSS_USERS which QQ lacks. This matches what notify() does
+// internally.
 // ============================================================
 
 // --- ArtMethod field offsets (determined at runtime) ---
@@ -77,12 +83,14 @@ struct SavedMethod {
 static std::mutex g_hook_mtx;                // serializes hook body + history
 static thread_local bool g_in_hook = false;  // reentrancy guard
 
-static SavedMethod g_saved_notify;                 // notify(String,int,Notification)
+static SavedMethod g_saved_notify;                  // notify(String,int,Notification)
+static SavedMethod g_saved_notify_int;              // notify(int,Notification)
 static jmethodID g_notifyAsUser_mid = nullptr;     // unhooked delivery path
-static jobject   g_userhandle_all = nullptr;       // UserHandle.ALL (global ref)
+static jobject   g_userhandle = nullptr;           // Process.myUserHandle() (global ref)
 
-// Forward declaration of the native hook callback.
+// Forward declarations of the native hook callbacks.
 static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobject notif);
+static void jni_notify_int(JNIEnv* env, jobject thiz, jint id, jobject notif);
 
 // ============================================================
 // Initialize version-dependent access flag values
@@ -934,9 +942,8 @@ static jobject processAndBuild(JNIEnv* env, jobject notif) {
 // and ultimately NotificationManagerService. We never touch the hooked
 // notify() ArtMethod again after install.
 // ============================================================
-
 static bool resolveDeliveryIds(JNIEnv* env) {
-    if (g_notifyAsUser_mid && g_userhandle_all) return true;
+    if (g_notifyAsUser_mid && g_userhandle) return true;
 
     if (!g_notifyAsUser_mid) {
         jclass nmCls = env->FindClass("android/app/NotificationManager");
@@ -956,29 +963,34 @@ static bool resolveDeliveryIds(JNIEnv* env) {
         }
     }
 
-    if (!g_userhandle_all) {
-        jclass uhCls = env->FindClass("android/os/UserHandle");
-        if (!uhCls || env->ExceptionCheck()) {
+    // Use Process.myUserHandle() — NOT UserHandle.ALL.
+    // UserHandle.ALL requires INTERACT_ACROSS_USERS permission which QQ lacks.
+    // This matches what NotificationManager.notify() does internally.
+    if (!g_userhandle) {
+        jclass procCls = env->FindClass("android/os/Process");
+        if (!procCls || env->ExceptionCheck()) {
             env->ExceptionClear();
-            LOGE("resolveDeliveryIds: UserHandle missing");
+            LOGE("resolveDeliveryIds: Process missing");
             return false;
         }
-        jfieldID allFid = env->GetStaticFieldID(uhCls, "ALL", "Landroid/os/UserHandle;");
-        if (env->ExceptionCheck() || !allFid) {
+        jmethodID myUH = env->GetStaticMethodID(procCls, "myUserHandle",
+            "()Landroid/os/UserHandle;");
+        env->DeleteLocalRef(procCls);
+        if (env->ExceptionCheck() || !myUH) {
             env->ExceptionClear();
-            env->DeleteLocalRef(uhCls);
-            LOGE("resolveDeliveryIds: UserHandle.ALL missing");
+            LOGE("resolveDeliveryIds: Process.myUserHandle missing");
             return false;
         }
-        jobject all = env->GetStaticObjectField(uhCls, allFid);
-        env->DeleteLocalRef(uhCls);
-        if (env->ExceptionCheck() || !all) {
+        jclass procCls2 = env->FindClass("android/os/Process");
+        jobject uh = env->CallStaticObjectMethod(procCls2, myUH);
+        env->DeleteLocalRef(procCls2);
+        if (env->ExceptionCheck() || !uh) {
             env->ExceptionClear();
-            LOGE("resolveDeliveryIds: UserHandle.ALL null");
+            LOGE("resolveDeliveryIds: myUserHandle() returned null");
             return false;
         }
-        g_userhandle_all = env->NewGlobalRef(all);
-        env->DeleteLocalRef(all);
+        g_userhandle = env->NewGlobalRef(uh);
+        env->DeleteLocalRef(uh);
     }
     return true;
 }
@@ -989,7 +1001,7 @@ static void callNotifyAsUserDirect(JNIEnv* env, jobject thiz,
         LOGE("callNotifyAsUserDirect: ids unresolved — notification LOST");
         return;
     }
-    env->CallVoidMethod(thiz, g_notifyAsUser_mid, tag, id, notif, g_userhandle_all);
+    env->CallVoidMethod(thiz, g_notifyAsUser_mid, tag, id, notif, g_userhandle);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGE("callNotifyAsUserDirect: notifyAsUser threw — notification lost");
@@ -997,21 +1009,16 @@ static void callNotifyAsUserDirect(JNIEnv* env, jobject thiz,
 }
 
 // ============================================================
-// jni_notify_tag: the native callback installed on
-// NotificationManager.notify(String,int,Notification).
-//
-// We rebuild the Notification as MessagingStyle when the parser
-// recognises a QQ chat notification, then deliver via the unhooked
-// notifyAsUser. If parsing/building fails, we deliver the original
-// notification the same way — a notification is never dropped.
+// Shared hook body: parse, rebuild, deliver via unhooked notifyAsUser.
 // ============================================================
 
-static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobject notif) {
-    // Reentrancy guard: notifyAsUser (the delivery path below) does not
-    // itself call notify(), so re-entry shouldn't happen. Guard anyway
-    // against any unexpected side-effect; on re-entry, just deliver the
-    // original directly without rebuilding.
+static void doHookBody(JNIEnv* env, jobject thiz, jstring tag, jint id,
+                       jobject notif, const char* which) {
+    LOGI("hook fired: %s id=%d notif=%p", which, (int)id, notif);
+
     if (g_in_hook) {
+        // Reentrant call (shouldn't happen — notifyAsUser doesn't call
+        // notify). Deliver original directly, no rebuild.
         callNotifyAsUserDirect(env, thiz, tag, id, notif);
         return;
     }
@@ -1023,9 +1030,14 @@ static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobj
 
     if (ensureAppContext(env) && cacheJniIds(env)) {
         built = processAndBuild(env, notif);
-        if (built) toPost = built;
+        if (built) {
+            toPost = built;
+            LOGI("rebuilt notification delivered via %s", which);
+        } else {
+            LOGI("passthrough (not a QQ chat or build failed) via %s", which);
+        }
     } else {
-        LOGE("jni_notify_tag: app context / jni ids not ready — passthrough");
+        LOGE("app context / jni ids not ready — passthrough via %s", which);
     }
 
     callNotifyAsUserDirect(env, thiz, tag, id, toPost);
@@ -1034,11 +1046,26 @@ static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobj
     g_in_hook = false;
 }
 
+// Hook callback: notify(String, int, Notification)
+static void jni_notify_tag(JNIEnv* env, jobject thiz, jstring tag, jint id, jobject notif) {
+    doHookBody(env, thiz, tag, id, notif, "notify(String,int,Notif)");
+}
+
+// Hook callback: notify(int, Notification) — tag is null
+static void jni_notify_int(JNIEnv* env, jobject thiz, jint id, jobject notif) {
+    doHookBody(env, thiz, nullptr, id, notif, "notify(int,Notif)");
+}
+
 // ============================================================
-// installNotifyHook: native-ize NotificationManager.notify(
-// String,int,Notification). NotificationManager is a boot framework
-// class, available immediately at process start, so we can install
-// synchronously in postAppSpecialize — no polling thread.
+// installNotifyHook: hook BOTH notify overloads.
+//
+// On API 37, AOT may inline notify(int,Notification) to call
+// notifyAsUser directly, bypassing notify(String,int,Notification).
+// Hooking both ensures we intercept regardless of which overload
+// QQ calls and regardless of AOT inlining decisions.
+//
+// NotificationManager is a boot framework class — available
+// immediately at process start, no polling needed.
 // ============================================================
 
 static void installNotifyHook(JNIEnv* env) {
@@ -1048,26 +1075,44 @@ static void installNotifyHook(JNIEnv* env) {
         LOGE("installNotifyHook: NotificationManager class missing");
         return;
     }
-    jmethodID mid = env->GetMethodID(nmCls, "notify",
-        "(Ljava/lang/String;ILandroid/app/Notification;)V");
-    if (env->ExceptionCheck() || !mid) {
-        env->ExceptionClear();
-        LOGE("installNotifyHook: notify(String,int,Notification) missing");
-        env->DeleteLocalRef(nmCls);
-        return;
-    }
-    jobject method = env->ToReflectedMethod(nmCls, mid, JNI_FALSE);
-    env->DeleteLocalRef(nmCls);
-    if (env->ExceptionCheck() || !method) {
-        env->ExceptionClear();
-        LOGE("installNotifyHook: ToReflectedMethod failed");
-        return;
+
+    // Hook notify(int, Notification)
+    {
+        jmethodID mid = env->GetMethodID(nmCls, "notify",
+            "(ILandroid/app/Notification;)V");
+        if (!env->ExceptionCheck() && mid) {
+            jobject method = env->ToReflectedMethod(nmCls, mid, JNI_FALSE);
+            if (method) {
+                bool ok = installHook(env, method,
+                    reinterpret_cast<void*>(jni_notify_int), g_saved_notify_int);
+                LOGI("notify(int,Notification) hook installed: %d", ok);
+                env->DeleteLocalRef(method);
+            }
+        } else {
+            env->ExceptionClear();
+            LOGE("notify(int,Notification) not found");
+        }
     }
 
-    bool ok = installHook(env, method,
-        reinterpret_cast<void*>(jni_notify_tag), g_saved_notify);
-    env->DeleteLocalRef(method);
-    LOGI("notify(String,int,Notification) hook installed: %d", ok);
+    // Hook notify(String, int, Notification)
+    {
+        jmethodID mid = env->GetMethodID(nmCls, "notify",
+            "(Ljava/lang/String;ILandroid/app/Notification;)V");
+        if (!env->ExceptionCheck() && mid) {
+            jobject method = env->ToReflectedMethod(nmCls, mid, JNI_FALSE);
+            if (method) {
+                bool ok = installHook(env, method,
+                    reinterpret_cast<void*>(jni_notify_tag), g_saved_notify);
+                LOGI("notify(String,int,Notification) hook installed: %d", ok);
+                env->DeleteLocalRef(method);
+            }
+        } else {
+            env->ExceptionClear();
+            LOGE("notify(String,int,Notification) not found");
+        }
+    }
+
+    env->DeleteLocalRef(nmCls);
 }
 
 // ============================================================
