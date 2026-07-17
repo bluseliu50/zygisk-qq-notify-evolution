@@ -1069,6 +1069,21 @@ static void installNotifyHooks(JNIEnv* env) {
 // Zygisk module entry point
 // ============================================================
 
+// Match QQ/TIM main process or a child process (:MSF, :pushservice, ...).
+// Returns true iff `name` equals "com.tencent.mobileqq"/"com.tencent.tim"
+// or starts with that prefix followed by ':'.
+static bool isQqTimProcess(const char* name) {
+    if (!name) return false;
+    static const char* kPkgs[] = {"com.tencent.mobileqq", "com.tencent.tim"};
+    for (const char* pkg : kPkgs) {
+        size_t n = strlen(pkg);
+        if (strncmp(name, pkg, n) == 0 && (name[n] == '\0' || name[n] == ':')) {
+            return true;
+        }
+    }
+    return false;
+}
+
 class QQNotifyEvoModule : public zygisk::ModuleBase {
 public:
     void onLoad(zygisk::Api* api, JNIEnv* env) override {
@@ -1081,8 +1096,11 @@ public:
         g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
 
         const char* name = env->GetStringUTFChars(args->nice_name, nullptr);
-        is_target = (name && (strcmp(name, "com.tencent.mobileqq") == 0 ||
-                              strcmp(name, "com.tencent.tim") == 0));
+        // Match QQ/TIM main process AND child processes (:MSF, :pushservice, etc).
+        // MiPush delivers notifications in the :pushservice child process, so a
+        // strict == comparison would miss it and the hook would never fire.
+        // Match either exact package name, or package name followed by ":child".
+        is_target = isQqTimProcess(name);
         env->ReleaseStringUTFChars(args->nice_name, name);
 
         if (!is_target) {
@@ -1095,6 +1113,10 @@ public:
 
         JNIEnv* env;
         g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+
+        const char* pname = env->GetStringUTFChars(args->nice_name, nullptr);
+        LOGI("loaded into process: %s", pname ? pname : "(null)");
+        env->ReleaseStringUTFChars(args->nice_name, pname);
 
         char sdkStr[8] = {0};
         __system_property_get("ro.build.version.sdk", sdkStr);
