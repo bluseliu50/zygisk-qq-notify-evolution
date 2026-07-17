@@ -11,6 +11,7 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
 add_library(qqnotify SHARED
     src/module.cpp
+    src/parser.cpp
 )
 
 target_include_directories(qqnotify PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
