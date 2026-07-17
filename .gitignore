@@ -7,3 +7,6 @@ local.properties
 .idea/
 .gradle/
 .cxx/
+# macOS / local analysis artifacts
+.DS_Store
+framework/
